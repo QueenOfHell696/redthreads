@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   Plus, Trash2, Link2, ZoomIn, ZoomOut, Search, Star,
-  ArrowLeft, StickyNote, FileText, X, Pin, Minus, Move
+  ArrowLeft, StickyNote, FileText, X, Pin, Hand, MousePointer2
 } from "lucide-react";
 
 // ---------- fonts ----------
@@ -241,6 +241,7 @@ function BoardCanvas({ boardId, boardMeta, onBack, onRename, onTouch }) {
   const [data, setData] = useState({ objects: [], connections: [] });
   const [loaded, setLoaded] = useState(false);
   const [selectedId, setSelectedId] = useState(null);
+  const [mode, setMode] = useState("move"); // 'move' | 'pan'
   const [connectMode, setConnectMode] = useState(false);
   const [connectFrom, setConnectFrom] = useState(null);
   const [selectedConnId, setSelectedConnId] = useState(null);
@@ -323,10 +324,10 @@ function BoardCanvas({ boardId, boardMeta, onBack, onRename, onTouch }) {
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  // object drag
-  const onObjectMouseDown = (e, obj) => {
-    e.stopPropagation();
+  // object drag/select — pointer events work for both mouse and touch
+  const onObjectPointerDown = (e, obj) => {
     if (connectMode) {
+      e.stopPropagation();
       if (!connectFrom) {
         setConnectFrom(obj.id);
       } else if (connectFrom !== obj.id) {
@@ -337,13 +338,19 @@ function BoardCanvas({ boardId, boardMeta, onBack, onRename, onTouch }) {
       }
       return;
     }
+    if (mode === "pan") {
+      // не трогаем объект — пусть событие всплывёт к фону и подвинет холст
+      return;
+    }
+    e.stopPropagation();
     setSelectedId(obj.id);
     setSelectedConnId(null);
-    dragRef.current = { id: obj.id, startX: e.clientX, startY: e.clientY, origX: obj.x, origY: obj.y };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    dragRef.current = { id: obj.id, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, origX: obj.x, origY: obj.y };
   };
 
-  const onCanvasMouseMove = (e) => {
-    if (dragRef.current) {
+  const onObjectPointerMove = (e) => {
+    if (dragRef.current && dragRef.current.pointerId === e.pointerId) {
       const { id, startX, startY, origX, origY } = dragRef.current;
       const dx = (e.clientX - startX) / view3.scale;
       const dy = (e.clientY - startY) / view3.scale;
@@ -351,36 +358,40 @@ function BoardCanvas({ boardId, boardMeta, onBack, onRename, onTouch }) {
         ...prev,
         objects: prev.objects.map((o) => o.id === id ? { ...o, x: origX + dx, y: origY + dy } : o),
       }));
-    } else if (panRef.current) {
+    }
+  };
+
+  const onObjectPointerUp = (e) => {
+    if (dragRef.current && dragRef.current.pointerId === e.pointerId) {
+      try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
+      dragRef.current = null;
+      setData((prev) => { persist(prev); return prev; });
+    }
+  };
+
+  const onCanvasPointerMove = (e) => {
+    if (panRef.current && panRef.current.pointerId === e.pointerId) {
       const { startX, startY, origX, origY } = panRef.current;
       setView3((v) => ({ ...v, x: origX + (e.clientX - startX), y: origY + (e.clientY - startY) }));
     }
   };
 
-  const onCanvasMouseUp = () => {
-    if (dragRef.current) {
-      persist(data);
-      dragRef.current = null;
-      setData((d) => d); // ensure latest state saved via ref of current
+  const onCanvasPointerUp = (e) => {
+    if (panRef.current && panRef.current.pointerId === e.pointerId) {
+      try { canvasRef.current.releasePointerCapture(e.pointerId); } catch {}
+      panRef.current = null;
     }
-    panRef.current = null;
   };
 
-  // need latest dragged data actually saved - fix by saving on mouseup using functional update
-  const handleMouseUp = () => {
-    if (dragRef.current) {
-      setData((prev) => { persist(prev); return prev; });
-      dragRef.current = null;
-    }
-    panRef.current = null;
-  };
-
-  const onBackgroundMouseDown = (e) => {
+  const onBackgroundPointerDown = (e) => {
     if (e.target !== canvasRef.current) return;
     setSelectedId(null);
     setSelectedConnId(null);
     if (connectMode) { setConnectMode(false); setConnectFrom(null); return; }
-    panRef.current = { startX: e.clientX, startY: e.clientY, origX: view3.x, origY: view3.y };
+    if (mode === "pan") {
+      canvasRef.current.setPointerCapture(e.pointerId);
+      panRef.current = { pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, origX: view3.x, origY: view3.y };
+    }
   };
 
   const onWheel = (e) => {
@@ -435,13 +446,14 @@ function BoardCanvas({ boardId, boardMeta, onBack, onRename, onTouch }) {
       {/* canvas */}
       <div
         ref={canvasRef}
-        onMouseDown={onBackgroundMouseDown}
-        onMouseMove={onCanvasMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
+        onPointerDown={onBackgroundPointerDown}
+        onPointerMove={onCanvasPointerMove}
+        onPointerUp={onCanvasPointerUp}
+        onPointerCancel={onCanvasPointerUp}
         onWheel={onWheel}
         style={{
-          position: "absolute", inset: 0, cursor: panRef.current ? "grabbing" : (connectMode ? "crosshair" : "default"),
+          position: "absolute", inset: 0, touchAction: "none",
+          cursor: mode === "pan" ? "grab" : (connectMode ? "crosshair" : "default"),
           backgroundColor: "#3a2f26",
           backgroundImage:
             "radial-gradient(#4a3c30 1px, transparent 1px)," +
@@ -496,7 +508,9 @@ function BoardCanvas({ boardId, boardMeta, onBack, onRename, onTouch }) {
               obj={obj}
               selected={selectedId === obj.id}
               connectPending={connectFrom === obj.id}
-              onMouseDown={(e) => onObjectMouseDown(e, obj)}
+              onPointerDown={(e) => onObjectPointerDown(e, obj)}
+              onPointerMove={onObjectPointerMove}
+              onPointerUp={onObjectPointerUp}
               onChange={(patch) => updateObject(obj.id, patch)}
             />
           ))}
@@ -508,6 +522,24 @@ function BoardCanvas({ boardId, boardMeta, onBack, onRename, onTouch }) {
         <button style={iconBtn} onClick={() => zoom(1)} title="приблизить"><ZoomIn size={16} /></button>
         <div style={{ fontSize: 11, textAlign: "center", color: "#a0937a" }}>{Math.round(view3.scale * 100)}%</div>
         <button style={iconBtn} onClick={() => zoom(-1)} title="отдалить"><ZoomOut size={16} /></button>
+      </div>
+
+      {/* режим: холст / объекты */}
+      <div style={modeBox}>
+        <button
+          style={{ ...modeBtn, background: mode === "pan" ? "#c0392b" : "transparent", color: mode === "pan" ? "#f0e6d2" : "#a0937a" }}
+          onClick={() => setMode("pan")}
+          title="двигать холст"
+        >
+          <Hand size={16} /><span>Холст</span>
+        </button>
+        <button
+          style={{ ...modeBtn, background: mode === "move" ? "#c0392b" : "transparent", color: mode === "move" ? "#f0e6d2" : "#a0937a" }}
+          onClick={() => setMode("move")}
+          title="двигать объекты"
+        >
+          <MousePointer2 size={16} /><span>Объекты</span>
+        </button>
       </div>
 
       {/* bottom toolbar */}
@@ -609,14 +641,18 @@ function BoardCanvas({ boardId, boardMeta, onBack, onRename, onTouch }) {
   );
 }
 
-function ObjectCard({ obj, selected, connectPending, onMouseDown, onChange }) {
+function ObjectCard({ obj, selected, connectPending, onPointerDown, onPointerMove, onPointerUp, onChange }) {
   return (
     <div
-      onMouseDown={onMouseDown}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
       style={{
         position: "absolute",
         left: obj.x, top: obj.y, width: obj.w, height: obj.h,
         background: obj.color,
+        touchAction: "none",
         boxShadow: selected
           ? "0 0 0 2px #d4a017, 2px 4px 10px rgba(0,0,0,0.5)"
           : connectPending
@@ -642,7 +678,7 @@ function ObjectCard({ obj, selected, connectPending, onMouseDown, onChange }) {
         <input
           value={obj.title}
           onChange={(e) => onChange({ title: e.target.value })}
-          onMouseDown={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
           style={{
             background: "transparent", border: "none", outline: "none",
             fontFamily: "'Special Elite', monospace", fontSize: 13, color: "#241d18",
@@ -653,7 +689,7 @@ function ObjectCard({ obj, selected, connectPending, onMouseDown, onChange }) {
       <textarea
         value={obj.text}
         onChange={(e) => onChange({ text: e.target.value })}
-        onMouseDown={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
         placeholder={obj.type === "note" ? "заметка…" : "детали…"}
         style={{
           background: "transparent", border: "none", outline: "none", resize: "none",
@@ -709,6 +745,15 @@ const zoomBox = {
   position: "absolute", right: 12, bottom: 90, background: "rgba(36,29,24,0.92)",
   border: "1px solid #4a3c30", borderRadius: 4, padding: 6, display: "flex",
   flexDirection: "column", alignItems: "center", gap: 4, zIndex: 10,
+};
+const modeBox = {
+  position: "absolute", left: 12, bottom: 18, background: "rgba(36,29,24,0.94)",
+  border: "1px solid #4a3c30", borderRadius: 6, padding: 4, display: "flex",
+  gap: 4, zIndex: 10,
+};
+const modeBtn = {
+  display: "flex", alignItems: "center", gap: 5, border: "none", borderRadius: 4,
+  padding: "8px 10px", fontFamily: "'Courier Prime', monospace", fontSize: 11, cursor: "pointer",
 };
 const toolbar = {
   position: "absolute", left: "50%", transform: "translateX(-50%)", bottom: 18,
